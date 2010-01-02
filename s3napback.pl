@@ -204,7 +204,7 @@ sub processBlock() {
     my $function;
     my @params;
 
-    for my $directive ( qw(Directory Subversion SubversionDir MySQL) ) {
+    for my $directive ( qw(Directory Subversion SubversionDir MySQL PostgreSQL) ) {
         for my $name ( $config->get($directive) ) {
             my $block = $config;
             if ( ref($name) eq 'ARRAY' ) {
@@ -229,6 +229,7 @@ sub processBlock() {
                 case "Subversion"       { $function = \&backupSubversion; }
                 case "SubversionDir"    { $function = \&backupSubversionDir; }
                 case "MySQL"            { $function = \&backupMysql; }
+                case "PostgreSQL"       { $function = \&backupPostgreSQL; }
             }
 
             &{$function}($name, $cyclespec, @params);
@@ -308,6 +309,39 @@ sub backupMysql {
     sendToS3( $datasource, $bucketfullpath, $usetemp, $logger );
 }
 
+sub backupPostgreSQL {
+    my ( $name, $cyclespec ) = @_;
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
+
+    my $logger = Log::Log4perl::get_logger("Backup::S3napback::PostgreSQL");
+
+    # note $diffs is ignored
+    my $ignore_diffs = 1;
+    my $cyclenum = getSlotNumber($cyclespec, $ignore_diffs);
+
+    my $user_opt = "";
+    if ( $name =~ /(.*)@(.*)/ ) {
+        $user_opt = "-U $1";
+        $name     = $2;
+    }
+
+    my $pg_dump_cmd = "";
+    if ( $name eq "all" ) {
+        $pg_dump_cmd = "pg_dumpall";
+        $name = "";
+    } else {
+        $pg_dump_cmd = "pg_dump";
+    }
+
+    my $datasource = "$pg_dump_cmd $user_opt $name | gzip";
+
+    my $bucketfullpath = "$bucket:PostgreSQL/$name-$cyclenum";
+    $logger->info("PostgreSQL $name -> $bucketfullpath");
+    sendToS3( $datasource, $bucketfullpath, $usetemp, $logger );
+}
+
 sub backupSubversionDir {
     my ( $name, $cyclespec ) = @_;
 
@@ -326,7 +360,6 @@ sub backupSubversionDir {
         }
     }
 }
-
 #
 # Inspired by from http://le-gall.net/pierrick/blog/index.php/2007/04/17/98-subversion-incremental-backup
 # Adapted to s3napback by Kevin Ross - metova.com
