@@ -211,7 +211,7 @@ sub processBlock() {
 
         my @excludes = $block->get("Exclude");
 
-        backupDirectory( $name, cyclespec($block), @excludes );
+        backupDirectory( $name, cyclespec($block), \@excludes );
     }
 
     for my $name ( $config->get("Subversion") ) {
@@ -249,8 +249,9 @@ sub processBlock() {
 }
 
 sub backupDirectory {
-    my ( $name, @cyclespec, @excludes ) = @_;
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @cyclespec;
+    my ( $name, $cyclespec, $excludes_ref ) = @_;
+    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
+    my @excludes = @{ $excludes_ref };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::Directory");
 
@@ -297,9 +298,9 @@ sub backupDirectory {
 }
 
 sub backupMysql {
-    my ( $name, @cyclespec ) = @_;
+    my ( $name, $cyclespec ) = @_;
 
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @cyclespec;
+    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::MySQL");
 
@@ -333,8 +334,8 @@ sub backupMysql {
 }
 
 sub backupSubversionDir {
-    my ( $name, @cyclespec ) = @_;
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @cyclespec;
+    my ( $name, $cyclespec ) = @_;
+    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::Subversion");
 
@@ -353,7 +354,7 @@ sub backupSubversionDir {
     foreach my $subdir (@subdirs) {
         $logger->debug(`svnadmin verify $name/$subdir 2>&1 1>/dev/null`);
         if ( $? == 0 ) {
-            backupSubversion( "$name/$subdir", @cyclespec );
+            backupSubversion( "$name/$subdir", $cyclespec );
         }
     }
 }
@@ -363,9 +364,9 @@ sub backupSubversionDir {
 # Adapted to s3napback by Kevin Ross - metova.com
 #
 sub backupSubversion {
-    my ( $name, @cyclespec ) = @_;
+    my ( $name, $cyclespec ) = @_;
 
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @cyclespec;
+    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::Subversion");
 
@@ -544,7 +545,8 @@ sub cyclespec {
     if ( !defined $diffs )     { $diffs     = 6; }
     if ( !defined $fulls )     { $fulls     = 4; }
 
-    return ( $frequency, $phase, $diffs, $fulls, $usetemp );
+    my @cyclespec = ( $frequency, $phase, $diffs, $fulls, $usetemp );
+    return \@cyclespec;
 }
 
 sub usage {
