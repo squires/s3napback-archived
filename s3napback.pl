@@ -544,6 +544,7 @@ sub cyclespec {
     if ( !defined $phase )     { $phase     = 0; }
     if ( !defined $diffs )     { $diffs     = 6; }
     if ( !defined $fulls )     { $fulls     = 4; }
+    if ( !defined $usetemp )   { $usetemp   = 0; }
 
     my @cyclespec = ( $frequency, $phase, $diffs, $fulls, $usetemp );
     return \@cyclespec;
