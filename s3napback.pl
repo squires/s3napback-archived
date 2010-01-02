@@ -67,7 +67,6 @@ my $curPath = dirname( rel2abs($0) ) . "/";
 Log::Log4perl->init("${curPath}s3napback.logconfig");
 
 sub main() {
-
     my $logger = Log::Log4perl::get_logger("Backup::S3napback");
 
 ###### Print the header
@@ -76,14 +75,12 @@ sub main() {
 
 ###### Process command-line Arguments + Options
 
-    getopts( 'c:t', \%opt ) || die usage();
+    getopts( 'c:ht', \%opt ) || die usage();
 
-    #if($opt{h}) {
-    #	usage();
-    #	exit 2;
-    #}
-
-    #my $debug = 0;
+    if ($opt{h}) {
+        usage();
+        exit 2;
+    }
 
     if ( $opt{t} ) {
         $logger->warn("TEST MODE ONLY, NO REAL ACTIONS WILL BE TAKEN");
@@ -92,10 +89,8 @@ sub main() {
 ###### Find config files
 
     my @configs;
-
-    # Hmm, does Getopt::Std modify @ARGV to contain only what it didn't parse, or are we here looking at the whole thing?
-    # (doesn't really matter in practice)
-
+    
+    # assume any params not processed are config files
     for (@ARGV) {
         if ( -f "/etc/s3napback/$_.conf" ) {
             push @configs, "/etc/s3napback/$_.conf";
@@ -105,6 +100,7 @@ sub main() {
         }
     }
 
+    # get one config file from -c option
     unshift @configs, $opt{c} if $opt{c};
     @configs = '' unless @configs;
 
@@ -118,7 +114,7 @@ sub main() {
 
         $mainConfig->read($configfile);
 
-        #print "config=" . $mainConfig->dump() . "\n";
+        $logger->debug("config=" . $mainConfig->dump());
 
         $diffdir = $mainConfig->get("DiffDir");
         $diffdir || die "DiffDir must be defined.";
@@ -130,9 +126,6 @@ sub main() {
 
         $tempdir = $mainConfig->get("TempDir");
         if ( defined $tempdir ) {
-
-            #  $tempdir || die "TempDir must be defined.";
-
             # insure that $tempdir ends with a slash
             if ( !( $tempdir =~ /\/$/ ) ) {
                 $tempdir = $tempdir . "/";
@@ -151,8 +144,6 @@ sub main() {
         }
 
         my $recipient = $mainConfig->get("GpgRecipient");
-
-        # $recipient || die "GpgRecipient must be defined.";
         # Empty recipient OK; in that case we just won't use GPG.
 
         my $s3keyfile = $mainConfig->get("S3Keyfile");
@@ -161,17 +152,11 @@ sub main() {
         my $chunksize = $mainConfig->get("ChunkSize");
         $chunksize || die "ChunkSize must be defined.";
 
-        #my $notifyemail = $mainConfig->get("NotifyEmail");
-        #my $logfile = $mainConfig->get("LogFile");
-        #my $loglevel = $mainConfig->get("LogLevel");
-
         ###### Check gpg key availability
 
         my $checkgpg = `gpg --batch $keyring --list-public-keys`;
         if ( defined $recipient && !( $checkgpg =~ /$recipient/ ) ) {
             $logger->logdie("GPG recipient $recipient not found in $checkgpg");
-
-            #die "Requested GPG public key not found: $recipient";
         }
 
         ###### Setup commands (this is the crux of the matter)
@@ -198,8 +183,6 @@ sub main() {
         @alreadyDoneToday = map { s/^.* - (.*?) - .*$/$1/; chomp; $_ } @alreadyDoneToday;
 
         $logger->info("Buckets already done today:");
-
-        #map { print; print "\n"; } @alreadyDoneToday;
         for (@alreadyDoneToday) { $logger->info($_); $isAlreadyDoneToday{$_} = 1; }
 
         ###### Perform the requested operations
@@ -210,9 +193,7 @@ sub main() {
             my $block = $mainConfig->block($cycle);
             processBlock($block);
         }
-
     }
-
 }
 
 sub processBlock() {
@@ -221,9 +202,6 @@ sub processBlock() {
     my $logger = Log::Log4perl::get_logger("Backup::S3napback");
 
     for my $name ( $config->get("Directory") ) {
-
-        #print "Directory $name\n";
-
         my $block = $config;
         if ( ref($name) eq 'ARRAY' ) {
             $logger->info( $name->[0] . " => " . $name->[1] );
@@ -237,9 +215,6 @@ sub processBlock() {
     }
 
     for my $name ( $config->get("Subversion") ) {
-
-        #print "Subversion $name\n";
-
         my $block = $config;
         if ( ref($name) eq 'ARRAY' ) {
             $logger->info( $name->[0] . " => " . $name->[1] );
@@ -271,7 +246,6 @@ sub processBlock() {
 
         backupMysql( $name, cyclespec($block) );
     }
-
 }
 
 sub backupDirectory {
@@ -357,27 +331,6 @@ sub backupMysql {
     $logger->info("MySQL $name -> $bucketfullpath");
     sendToS3( $datasource, $bucketfullpath, $usetemp, $logger );
 }
-
-# old version made only full backups, no diffs
-# sub backupSubversion
-#	{
-#	my ($name, $frequency, $phase, $fulls) = @_;
-#
-#	if(($yday + $phase) % $frequency != 0)
-#		{
-#		print "Skipping $name\n";
-#		return;
-#		}
-#
-#	my $cycles = $fulls;
-#	my $cyclenum = (($yday + $phase) / $frequency) % $cycles;
-#
-#	my $datasource = "svnadmin -q dump $name | gzip";
-#	my $bucketfullpath = "$bucket:$name-$cyclenum";
-#
-#	print "Subversion $name -> $bucketfullpath\n";
-#	sendToS3($datasource, $bucketfullpath);
-#	}
 
 sub backupSubversionDir {
     my ( $name, @cyclespec ) = @_;
@@ -490,9 +443,7 @@ sub backupSubversion {
 }
 
 sub sendToS3 {
-
     # by passing the logger in here we can select to print debug log messages only for MySQL blocks, etc.
-
     my ( $datasource, $bucketfullpath, $shouldUseTempFile, $logger ) = @_;
 
     if ( $isAlreadyDoneToday{$bucketfullpath} && !$opt{f} ) {
@@ -506,7 +457,6 @@ sub sendToS3 {
     $tempfile = $tempdir . $tempfile;
 
     if ( $opt{t} ) {
-
         $logger->info("$delete_from_s3 $bucketfullpath");
 
         # print out the statements for test mode.
@@ -519,7 +469,6 @@ sub sendToS3 {
             $logger->info("rm $tempfile");
         }
         else {
-
             # stream the data
             $logger->info("$datasource $encrypt | $send_to_s3 $bucketfullpath");
         }
@@ -559,12 +508,10 @@ sub sendToS3 {
 
     }
     else {
-
         # stream the data
         $logger->debug(`$datasource $encrypt | $send_to_s3 $bucketfullpath`);
         deleteOnError();
     }
-
 }
 
 sub deleteOnError {
@@ -581,7 +528,6 @@ sub deleteOnError {
             $logger->error("Could not delete partial backup: $!");
         }
     }
-
 }
 
 sub cyclespec {
@@ -599,6 +545,10 @@ sub cyclespec {
     if ( !defined $fulls )     { $fulls     = 4; }
 
     return ( $frequency, $phase, $diffs, $fulls, $usetemp );
+}
+
+sub usage {
+    print "usage: s3napback.pl [-t] -c config\n";
 }
 
 main();
