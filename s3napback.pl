@@ -44,6 +44,7 @@ use Getopt::Std;
 use Config::ApacheFormat;
 use File::Spec::Functions qw(rel2abs);
 use File::Basename;
+use Switch;
 
 my $diffdir;
 my $tempdir;
@@ -200,70 +201,51 @@ sub processBlock() {
     my ($config) = @_;
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback");
+    my $function;
+    my @params;
 
-    for my $name ( $config->get("Directory") ) {
-        my $block = $config;
-        if ( ref($name) eq 'ARRAY' ) {
-            $logger->info( $name->[0] . " => " . $name->[1] );
-            $block = $config->block($name);
-            $name  = $name->[1];
+    for my $directive ( qw(Directory Subversion SubversionDir MySQL) ) {
+        for my $name ( $config->get($directive) ) {
+            my $block = $config;
+            if ( ref($name) eq 'ARRAY' ) {
+                $logger->info( $name->[0] . " => " . $name->[1] );
+                $block = $config->block($name);
+                $name  = $name->[1];
+            }
+
+            my $cyclespec = cyclespec($block);
+            if (!isBackupDay($cyclespec)) {
+                $logger->warn("Skipping $directive $name");
+                next;
+            }
+
+            @params = ();
+            switch ($directive)
+            {
+                case "Directory"        { $function = \&backupDirectory;
+                                          my @excludes = $block->get("Exclude");
+                                          @params = ( \@excludes ); }
+
+                case "Subversion"       { $function = \&backupSubversion; }
+                case "SubversionDir"    { $function = \&backupSubversionDir; }
+                case "MySQL"            { $function = \&backupMysql; }
+            }
+
+            &{$function}($name, $cyclespec, @params);
         }
-
-        my @excludes = $block->get("Exclude");
-
-        backupDirectory( $name, cyclespec($block), \@excludes );
-    }
-
-    for my $name ( $config->get("Subversion") ) {
-        my $block = $config;
-        if ( ref($name) eq 'ARRAY' ) {
-            $logger->info( $name->[0] . " => " . $name->[1] );
-            $block = $config->block($name);
-            $name  = $name->[1];
-        }
-
-        backupSubversion( $name, cyclespec($block) );
-    }
-
-    for my $name ( $config->get("SubversionDir") ) {
-        my $block = $config;
-        if ( ref($name) eq 'ARRAY' ) {
-            $logger->info( $name->[0] . " => " . $name->[1] );
-            $block = $config->block($name);
-            $name  = $name->[1];
-        }
-
-        backupSubversionDir( $name, cyclespec($block) );
-    }
-
-    for my $name ( $config->get("MySQL") ) {
-        my $block = $config;
-        if ( ref($name) eq 'ARRAY' ) {
-            $logger->info( $name->[0] . " => " . $name->[1] );
-            $block = $config->block($name);
-            $name  = $name->[1];
-        }
-
-        backupMysql( $name, cyclespec($block) );
     }
 }
 
 sub backupDirectory {
     my ( $name, $cyclespec, $excludes_ref ) = @_;
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
     my @excludes = @{ $excludes_ref };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::Directory");
 
-    if ( ( $yday + $phase ) % $frequency != 0 ) {
-        $logger->warn("Skipping $name");
-        return;
-    }
-
-    my $difffile = $name . ".diff";
-    $difffile =~ s/\//_/g;
-    $difffile = $diffdir . $difffile;
-
+    my $difffile = getDiffFilename($name);
     my $sb = stat($difffile);
     if ( defined $sb ) {
         my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $diffyday, $isdst ) = localtime( $sb->mtime );
@@ -274,13 +256,10 @@ sub backupDirectory {
         }
     }
 
-    my $cycles = $fulls * ( $diffs + 1 );
-    my $cyclenum = ( ( $yday + $phase ) / $frequency ) % $cycles;
+    my $cyclenum = getSlotNumber($cyclespec);
+    my $type = getSlotMode($cyclespec, $cyclenum);
 
-    my $type = "DIFF";
-
-    if ( $cyclenum % ( $diffs + 1 ) == 0 ) {
-        $type = "FULL";
+    if ($type eq "FULL") {
         unlink $difffile;
     }
 
@@ -299,20 +278,16 @@ sub backupDirectory {
 
 sub backupMysql {
     my ( $name, $cyclespec ) = @_;
-
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::MySQL");
 
     # note $diffs is ignored
 
-    if ( ( $yday + $phase ) % $frequency != 0 ) {
-        $logger->warn("Skipping $name");
-        return;
-    }
-
-    my $cycles = $fulls;
-    my $cyclenum = ( ( $yday + $phase ) / $frequency ) % $cycles;
+    my $ignore_diffs = 1;
+    my $cyclenum = getSlotNumber($cyclespec, $ignore_diffs);
 
     my $socket    = "";
     my $socketopt = "";
@@ -335,15 +310,8 @@ sub backupMysql {
 
 sub backupSubversionDir {
     my ( $name, $cyclespec ) = @_;
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::Subversion");
-
-    # this will be rechecked for each individual directory, but we may as well abort now if it's the wrong day
-    if ( ( $yday + $phase ) % $frequency != 0 ) {
-        $logger->warn("Skipping $name");
-        return;
-    }
 
     # inspired by https://popov-cs.grid.cf.ac.uk/subversion/WeSC/scripts/svn_backup
 
@@ -365,19 +333,13 @@ sub backupSubversionDir {
 #
 sub backupSubversion {
     my ( $name, $cyclespec ) = @_;
-
-    my ( $frequency, $phase, $diffs, $fulls, $usetemp ) = @{ $cyclespec };
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
 
     my $logger = Log::Log4perl::get_logger("Backup::S3napback::Subversion");
 
-    if ( ( $yday + $phase ) % $frequency != 0 ) {
-        $logger->warn("Skipping $name");
-        return;
-    }
-
-    my $difffile = $name . ".diff";
-    $difffile =~ s/\//_/g;
-    $difffile = $diffdir . $difffile;
+    my $difffile = getDiffFilename($name);
 
     # initialize the last saved revision as -1, that way on the first pass it is simply incremented to 0 (the first revision).
     my $lastSavedRevision = -1;
@@ -399,14 +361,13 @@ sub backupSubversion {
         close(LAST_SAVED_REVISION);
     }
 
-    my $cycles = $fulls * ( $diffs + 1 );
-    my $cyclenum = ( ( $yday + $phase ) / $frequency ) % $cycles;
+    my $cyclenum = getSlotNumber($cyclespec);
 
-    my $type = "DIFF";
-
-    if ( $cyclenum % ( $diffs + 1 ) == 0 || $lastSavedRevision < 0 ) {
+    my $type = getSlotMode($cyclespec, $cyclenum);
+    if ($lastSavedRevision < 0) {
         $type = "FULL";
-
+    }
+    if ($type eq "FULL") {
         # remove the diff file, we want to do a full backup.
         unlink $difffile;
         $lastSavedRevision = -1;
@@ -534,20 +495,142 @@ sub deleteOnError {
 sub cyclespec {
     my ($block) = @_;
 
-    my $frequency = $block->get("Frequency");
-    my $phase     = $block->get("Phase");
-    my $diffs     = $block->get("Diffs");
-    my $fulls     = $block->get("Fulls");
-    my $usetemp   = $block->get("UseTempFile");
+    my $cycletype = $block->get("CycleType");
+    
+    # SimpleCycle
+    my $frequency    = $block->get("Frequency");
+    my $phase        = $block->get("Phase");
+    my $diffs        = $block->get("Diffs");
+    my $fulls        = $block->get("Fulls");
 
-    if ( !defined $frequency ) { $frequency = 1; }
-    if ( !defined $phase )     { $phase     = 0; }
-    if ( !defined $diffs )     { $diffs     = 6; }
-    if ( !defined $fulls )     { $fulls     = 4; }
-    if ( !defined $usetemp )   { $usetemp   = 0; }
+    # HanoiCycle
+    my $discs        = $block->get("Discs");
+    my $archivedisc  = $block->get("ArchiveOldestDisc");
 
-    my @cyclespec = ( $frequency, $phase, $diffs, $fulls, $usetemp );
+    my $usetemp      = $block->get("UseTempFile");
+
+    if ( !defined $cycletype )     { $cycletype = "SimpleCycle"; }
+    
+    if ( !defined $frequency )     { $frequency   = 1; }
+    if ( !defined $phase )         { $phase       = 0; }
+    if ( !defined $diffs )         { $diffs       = 6; }
+    if ( !defined $fulls )         { $fulls       = 4; }
+
+    if ( !defined $discs )         { $discs       = 5; }
+    if ( !defined $archivedisc )   { $archivedisc = 0; } # false
+
+    if ( !defined $usetemp )       { $usetemp     = 0; } # false
+
+    my @cyclespec = ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+                      $discs, $archivedisc,
+                      $usetemp );
+
     return \@cyclespec;
+}
+
+sub getSlotNumber {
+    my ( $cyclespec, $ignore_diffs ) = @_;
+
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
+
+    if (!defined $ignore_diffs) {
+        $ignore_diffs = 0;
+    }
+    
+    my $cyclenum = undef;
+
+    switch ($cycletype)
+    {
+        case "SimpleCycle"  { 
+            my $cycles = 0;
+            if ($ignore_diffs) {
+                $cycles = $fulls;
+            } else {
+                $cycles = $fulls * ( $diffs + 1 );
+            }
+            $cyclenum = ( ( $yday + $phase ) / $frequency ) % $cycles;
+        }
+
+        case "HanoiCycle" {
+            my $cycle_days   = 2 ** ($discs - 1); # number of days it takes to use all slots
+            my $epoch_days   = int(time / 86400); # days since epoch
+            my $epoch_cycle  = int($epoch_days / ($cycle_days * $frequency)); # cycles since epoch
+            my $cycle_day    = (($epoch_days / $frequency) % $cycle_days) + 1; # day nbr within cycle
+
+            my $cycle_slot   = leastSignificantBitPosition($cycle_day);
+            my $archive_slot = $epoch_cycle + $cycle_slot;
+
+            if ($archivedisc) {
+                $cyclenum = $archive_slot;
+            } else {
+                $cyclenum = $cycle_slot;
+            }
+        }
+    }
+
+    return $cyclenum;
+}
+
+sub getSlotMode {
+    my ( $cyclespec, $cyclenum ) = @_;
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
+    
+    my $type = undef;
+
+    switch ($cycletype)
+    {
+        case "SimpleCycle" {
+            $type = "DIFF";
+            if ( $cyclenum % ( $diffs + 1 ) == 0 ) {
+                $type = "FULL";
+            }
+        }
+
+        case "HanoiCycle" {
+            $type = "FULL";
+        }
+    }
+
+    return $type;
+}
+
+sub isBackupDay {
+    my $cyclespec = shift;
+    my ( $cycletype, $frequency, $phase, $diffs, $fulls, 
+         $discs, $archivedisc,
+         $usetemp ) = @{ $cyclespec };
+    
+    my $result = 0;
+
+    switch ($cycletype)
+    {
+        case "SimpleCycle"  { $result = ($yday + $phase) % $frequency == 0; }
+        case "HanoiCycle"   { $result = int(time / 86400) % $frequency == 0; }
+    }
+
+    return $result;
+}
+
+sub getDiffFilename {
+    my $name = shift;
+    my $difffile = $name . ".diff";
+    $difffile =~ s/\//_/g;
+    $difffile = $diffdir . $difffile;
+    return $difffile;
+}
+
+sub leastSignificantBitPosition {
+    my $value = shift;
+
+    my $clear_lsb   = $value & ($value - 1);
+    my $isolate_lsb = $value ^ $clear_lsb;
+    my $lsb_pos     = log($isolate_lsb) / log(2);
+
+    return $lsb_pos;
 }
 
 sub usage {
